@@ -1,0 +1,27 @@
+{
+  "name": "duplex-sync-engine-server",
+  "version": "1.0.0",
+  "description": "Backend for duplex-sync-engine: bi-directional sync between Google Sheets and MySQL",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "NODE_ENV=development node server.js"
+  },
+  "keywords": [
+    "google-sheets",
+    "mysql",
+    "sync",
+    "websocket"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.4",
+    "express": "^5.2.1",
+    "googleapis": "^171.4.0",
+    "mysql2": "^3.17.0",
+    "ws": "^8.19.0"
+  }
+}
