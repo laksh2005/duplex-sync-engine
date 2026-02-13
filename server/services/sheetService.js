@@ -4,7 +4,10 @@ const { computeChecksum } = require('../utils/checksum')
 
 function getSheetConfig() {
   const spreadsheetId = process.env.GOOGLE_SHEET_ID
-  const range = process.env.GOOGLE_SHEET_RANGE || 'Sheet1'
+  let range = (process.env.GOOGLE_SHEET_RANGE || 'Sheet1').trim()
+  if (!range.includes('!')) {
+    range = `${range}!A:Z`
+  }
   return { spreadsheetId, range }
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, Database, Sheet, RefreshCw } from 'lucide-react'
 import './App.css'
 
@@ -36,6 +36,8 @@ function App() {
   const [status, setStatus] = useState('idle')
   const [eventLog, setEventLog] = useState([])
   const [loading, setLoading] = useState(false)
+  const isSyncingRef = useRef(false)
+  const pendingEventsRef = useRef([])
 
   async function fetchData() {
     setLoading(true)
@@ -65,26 +67,45 @@ function App() {
     if (message.type === 'status') {
       if (message.payload.status) {
         setStatus(message.payload.status)
+        if (message.payload.status === 'syncing') {
+          isSyncingRef.current = true
+          pendingEventsRef.current = []
+        }
+        if (message.payload.status === 'idle') {
+          const pending = pendingEventsRef.current
+          isSyncingRef.current = false
+          pendingEventsRef.current = []
+          const inserts = pending.filter(e => e.type === 'sync_event' && e.payload?.action === 'insert').length
+          const updates = pending.filter(e => e.type === 'sync_event' && e.payload?.action === 'update').length
+          const deletes = pending.filter(e => e.type === 'sync_event' && e.payload?.action === 'delete').length
+          const conflicts = pending.filter(e => e.type === 'conflict_event').length
+          const parts = []
+          if (inserts) parts.push(`${inserts} insert${inserts > 1 ? 's' : ''}`)
+          if (updates) parts.push(`${updates} update${updates > 1 ? 's' : ''}`)
+          if (deletes) parts.push(`${deletes} delete${deletes > 1 ? 's' : ''}`)
+          if (conflicts) parts.push(`${conflicts} conflict${conflicts > 1 ? 's' : ''}`)
+          const summary = parts.length ? parts.join(', ') : 'no changes'
+          const timestamp = new Date().toISOString()
+          setEventLog(prev => {
+            const last = prev[0]
+            const sameAsLast = last?.type === 'sync_summary' && last?.summary === summary && last?.timestamp && (new Date(last.timestamp).getTime() - new Date(timestamp).getTime() < 2000)
+            if (sameAsLast) return prev
+            return [{ type: 'sync_summary', summary, timestamp }, ...prev].slice(0, 15)
+          })
+          fetchData()
+        }
       }
       if (message.payload.lastSyncTime) {
         setLastSyncTime(message.payload.lastSyncTime)
       }
-      if (message.payload.status === 'idle') {
-        fetchData()
-      }
     }
     if (message.type === 'sync_event' || message.type === 'conflict_event') {
-      setEventLog(prev => {
-        const next = [
-          {
-            type: message.type,
-            payload: message.payload,
-            timestamp: new Date().toISOString()
-          },
-          ...prev
-        ]
-        return next.slice(0, 15)
-      })
+      if (isSyncingRef.current) {
+        pendingEventsRef.current.push({
+          type: message.type,
+          payload: message.payload || {}
+        })
+      }
     }
   })
 
@@ -98,21 +119,7 @@ function App() {
     return 'Idle'
   }, [status])
 
-  // Collapse consecutive identical events (same id + action) for simpler UI
-  const eventSummary = useMemo(() => {
-    if (!eventLog.length) return []
-    const groups = []
-    for (const event of eventLog) {
-      const key = `${event.type}-${event.payload?.id ?? ''}-${event.payload?.action ?? event.payload?.winner ?? ''}`
-      if (groups.length && groups[groups.length - 1].key === key) {
-        groups[groups.length - 1].count++
-        groups[groups.length - 1].timestamp = event.timestamp
-      } else {
-        groups.push({ key, ...event, count: 1 })
-      }
-    }
-    return groups.slice(0, 10)
-  }, [eventLog])
+  const eventSummary = useMemo(() => eventLog.slice(0, 10), [eventLog])
 
   async function handleForceSync() {
     try {
@@ -185,10 +192,10 @@ function App() {
               <span className="text-xs text-white/50">{dbData.length} rows</span>
             </div>
             <div className="flex-1 overflow-auto rounded-lg border border-white/20 mb-4">
-              <DbTable rows={dbData} />
+              <DbTable rows={dbData} sheetHeaders={sheetData.headers} />
             </div>
           </section>
-          <section className="border border-white/20 rounded-lg p-3">
+          {/* <section className="border border-white/20 rounded-lg p-3">
               <h3 className="text-xs uppercase tracking-wide text-white/50 mb-2">
                 Recent activity
               </h3>
@@ -198,16 +205,13 @@ function App() {
                 )}
                 {eventSummary.map((item, index) => (
                   <div
-                    key={`${item.key}-${index}`}
+                    key={`${item.timestamp}-${index}`}
                     className="flex items-center justify-between text-white/70"
                   >
                     <span>
-                      {item.type === 'sync_event' ? 'Sync' : 'Conflict'}{' '}
-                      {item.payload?.id || '—'}{' '}
-                      {item.payload?.action || item.payload?.winner || ''}
-                      {/* {item.count > 1 && (
-                        <span className="text-white/50"> × {item.count}</span>
-                      )} */}
+                      {item.type === 'sync_summary'
+                        ? `Sync: ${item.summary}`
+                        : `${item.type === 'sync_event' ? 'Sync' : 'Conflict'} ${item.payload?.id ?? '—'} ${item.payload?.action ?? item.payload?.winner ?? ''}`}
                     </span>
                     <span className="text-white/40 tabular-nums">
                       {new Date(item.timestamp).toLocaleTimeString()}
@@ -215,7 +219,7 @@ function App() {
                   </div>
                 ))}
               </div>
-            </section>
+            </section> */}
 
         </main>
         {loading && (
@@ -275,7 +279,14 @@ function DataTable({ headers, rows }) {
 
 const DB_HIDE_COLUMNS = ['checksum']
 
-function DbTable({ rows }) {
+function sanitizeColumnKey(header) {
+  const trimmed = String(header || '').trim().toLowerCase()
+  let normalized = trimmed.replace(/[^a-z0-9]+/g, '_')
+  if (/^[0-9]/.test(normalized)) normalized = `col_${normalized}`
+  return normalized || 'col_unnamed'
+}
+
+function DbTable({ rows, sheetHeaders = [] }) {
   if (!rows || !rows.length) {
     return (
       <div className="p-4 text-sm text-white/50 bg-black">
@@ -284,6 +295,20 @@ function DbTable({ rows }) {
     )
   }
   const keys = Object.keys(rows[0]).filter(k => !DB_HIDE_COLUMNS.includes(k))
+  const keyToLabel = useMemo(() => {
+    const map = {}
+    const keySet = new Set(keys)
+    keys.forEach(k => {
+      map[k] = k
+    })
+    if (Array.isArray(sheetHeaders) && sheetHeaders.length) {
+      sheetHeaders.forEach(h => {
+        const key = sanitizeColumnKey(h)
+        if (keySet.has(key)) map[key] = String(h).trim() || key
+      })
+    }
+    return map
+  }, [rows, sheetHeaders])
   return (
     <table className="min-w-full text-xs bg-black">
       <thead className="bg-white/5 sticky top-0 z-10">
@@ -293,7 +318,7 @@ function DbTable({ rows }) {
               key={key}
               className="px-3 py-2 text-left font-normal text-white/80 border-b border-white/20"
             >
-              {key}
+              {keyToLabel[key] ?? key}
             </th>
           ))}
         </tr>

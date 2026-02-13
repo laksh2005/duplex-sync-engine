@@ -20,9 +20,9 @@ Two-way sync between Google Sheets and MySQL with a simple dashboard. Change dat
   
 ## Stack
 
-- **Backend:** Node.js, Express, MySQL (mysql2), Google Sheets API, WebSockets (ws)
-- **Frontend:** Vite, React, Tailwind CSS, lucide-react
-- **Database:** Tables created on first run (`synced_rows`, `sync_logs`, `conflict_logs`, `metadata`)
+- **Backend:** Node.js, Express, Google Sheets API, WebSockets
+- **Frontend:** React, Tailwind CSS
+- **Database:** MySQL
 
 ## Project structure
 
@@ -48,11 +48,7 @@ duplex-sync-engine/
 ## API
 
 - `GET /api/data/sheet` — Headers and rows from the Google Sheet
-- `GET /api/data/db` — Rows from MySQL (active only; no internal columns like `checksum`)
+- `GET /api/data/db` — Active rows from MySQL
 - `GET /api/sync/meta` — `lastSyncTime`
 - `POST /api/sync/force` — Run a sync (manual)
 - WebSocket at `/ws` broadcasts `status` (idle/syncing/error), `sync_event`, and `conflict_event` so the UI can update in real time.
-
-
-
-

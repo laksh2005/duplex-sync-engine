@@ -7,6 +7,10 @@ const SYNC_LOGS_TABLE = 'sync_logs'
 const CONFLICT_LOGS_TABLE = 'conflict_logs'
 const METADATA_TABLE = 'metadata'
 
+function quoteId(name) {
+  return '`' + String(name).replace(/`/g, '``') + '`'
+}
+
 async function initSchema() {
   const conn = await getConnection()
   try {
@@ -79,7 +83,7 @@ async function ensureColumnsForHeaders(headers) {
     return
   }
   const alters = toAdd
-    .map(c => `ADD COLUMN ${c.key} varchar(255) NULL`)
+    .map(c => `ADD COLUMN ${quoteId(c.key)} varchar(255) NULL`)
     .join(', ')
   await pool.query(`ALTER TABLE ${SYNC_TABLE} ${alters}`)
 }
@@ -116,18 +120,19 @@ async function upsertRows(rows) {
 
     const toAdd = dynamicKeys.filter(k => !existingColumns.includes(k))
     if (toAdd.length) {
-      const alters = toAdd.map(k => `ADD COLUMN ${k} varchar(255) NULL`).join(', ')
+      const alters = toAdd.map(k => `ADD COLUMN ${quoteId(k)} varchar(255) NULL`).join(', ')
       await conn.query(`ALTER TABLE ${SYNC_TABLE} ${alters}`)
     }
 
     const columns = ['id', 'updated_at', 'checksum', 'deleted', ...dynamicKeys]
+    const quotedColumns = columns.map(quoteId)
     const placeholders = columns.map(() => '?').join(', ')
     const updates = columns
       .filter(c => c !== 'id')
-      .map(c => `${c}=VALUES(${c})`)
+      .map(c => `${quoteId(c)}=VALUES(${quoteId(c)})`)
       .join(', ')
 
-    const sql = `INSERT INTO ${SYNC_TABLE} (${columns.join(', ')}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE ${updates}`
+    const sql = `INSERT INTO ${SYNC_TABLE} (${quotedColumns.join(', ')}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE ${updates}`
 
     const batch = rows.map(row =>
       columns.map(col => {
