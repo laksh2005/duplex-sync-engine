@@ -1,5 +1,5 @@
 /**
- * duplex-sync-engine - Google Sheets push trigger
+ * Parity - Google Sheets push trigger
  *
  * Notifies the sync server the moment someone edits the sheet, so a sync runs
  * on the edit instead of waiting for a poll.

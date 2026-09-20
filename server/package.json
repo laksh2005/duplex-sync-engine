@@ -1,7 +1,7 @@
 {
-  "name": "duplex-sync-engine-server",
+  "name": "parity-server",
   "version": "2.0.0",
-  "description": "Backend for duplex-sync-engine: bi-directional sync between Google Sheets and MySQL",
+  "description": "Parity server: two-way sync between Google Sheets and MySQL",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

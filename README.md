@@ -1,6 +1,6 @@
-# duplex-sync-engine
+# Parity
 
-Two-way sync between Google Sheets and MySQL. Edit either side and both converge, automatically, within about a second.
+Two-way sync between Google Sheets and MySQL, keeping both sides identical. Edit either side and both converge, automatically, within about a second.
 
 Sheet edits push over a webhook, database edits are picked up by a change detector, and every sync runs through a Redis-backed queue that batches bursts, retries failures and keeps exactly one sync in flight at a time.
 
@@ -174,7 +174,7 @@ Everything lives in `server/.env`, documented in [`server/.env.example`](server/
 ## Layout
 
 ```
-duplex-sync-engine/
+parity/
 ├── docker-compose.yml          MySQL, Redis, API, worker, dashboard
 ├── .github/workflows/ci.yml    lint, tests, load test, image builds
 ├── client/                     Vite + React dashboard, nginx image

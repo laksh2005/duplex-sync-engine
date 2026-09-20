@@ -119,7 +119,7 @@ async function runDbBenchmarks(count) {
 async function main() {
   const { rows, skipDb } = parseArgs(process.argv.slice(2))
 
-  console.log(`duplex-sync-engine load test`)
+  console.log(`parity load test`)
   console.log(`rows: ${rows.toLocaleString()}   node: ${process.version}`)
 
   const planner = await runPlannerBenchmarks(rows)

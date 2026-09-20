@@ -1,7 +1,7 @@
 const { Queue } = require('bullmq')
 const { createRedisConnection } = require('../config/redis')
 
-const QUEUE_NAME = 'duplex-sync'
+const QUEUE_NAME = 'parity-sync'
 const JOB_NAME = 'full-sync'
 
 // A sync is a full reconcile of both sides, so two pending syncs are never
@@ -14,8 +14,8 @@ const DEDUPE_JOB_ID = 'full-sync'
 // the sheet, rather than syncing mid-paste.
 const DEBOUNCE_MS = Number(process.env.SYNC_DEBOUNCE_MS || 750)
 
-const DIRTY_KEY = 'duplex:sync:dirty'
-const CHANGED_AT_KEY = 'duplex:sync:changed_at'
+const DIRTY_KEY = 'parity:sync:dirty'
+const CHANGED_AT_KEY = 'parity:sync:changed_at'
 
 // An unclaimed edit timestamp older than this is meaningless for latency.
 const CHANGED_AT_TTL_SECONDS = Number(process.env.SYNC_CHANGED_AT_TTL_SECONDS || 900)

@@ -11,14 +11,14 @@ services:
     image: mysql:8.0
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-duplex}
-      MYSQL_DATABASE: ${DB_NAME:-duplex_sync}
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-parity}
+      MYSQL_DATABASE: ${DB_NAME:-parity}
     ports:
       - '${DB_PORT:-3306}:3306'
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
-      test: ['CMD', 'mysqladmin', 'ping', '-h', '127.0.0.1', '-p${DB_PASSWORD:-duplex}']
+      test: ['CMD', 'mysqladmin', 'ping', '-h', '127.0.0.1', '-p${DB_PASSWORD:-parity}']
       interval: 5s
       timeout: 5s
       retries: 20
@@ -50,8 +50,8 @@ services:
       DB_HOST: mysql
       DB_PORT: 3306
       DB_USER: root
-      DB_PASSWORD: ${DB_PASSWORD:-duplex}
-      DB_NAME: ${DB_NAME:-duplex_sync}
+      DB_PASSWORD: ${DB_PASSWORD:-parity}
+      DB_NAME: ${DB_NAME:-parity}
       REDIS_URL: redis://redis:6379
       # The worker service below owns job processing.
       RUN_WORKER_INLINE: '0'
@@ -75,8 +75,8 @@ services:
       DB_HOST: mysql
       DB_PORT: 3306
       DB_USER: root
-      DB_PASSWORD: ${DB_PASSWORD:-duplex}
-      DB_NAME: ${DB_NAME:-duplex_sync}
+      DB_PASSWORD: ${DB_PASSWORD:-parity}
+      DB_NAME: ${DB_NAME:-parity}
       REDIS_URL: redis://redis:6379
     depends_on:
       mysql:

@@ -55,12 +55,12 @@ jobs:
       mysql:
         image: mysql:8.0
         env:
-          MYSQL_ROOT_PASSWORD: duplex
-          MYSQL_DATABASE: duplex_sync_test
+          MYSQL_ROOT_PASSWORD: parity
+          MYSQL_DATABASE: parity_test
         ports:
           - 3306:3306
         options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1 -pduplex"
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -pparity"
           --health-interval=5s
           --health-timeout=5s
           --health-retries=20
@@ -80,8 +80,8 @@ jobs:
       DB_HOST: 127.0.0.1
       DB_PORT: '3306'
       DB_USER: root
-      DB_PASSWORD: duplex
-      DB_NAME: duplex_sync_test
+      DB_PASSWORD: parity
+      DB_NAME: parity_test
       REDIS_URL: redis://127.0.0.1:6379
 
     steps:
@@ -137,7 +137,7 @@ jobs:
         with:
           context: ./server
           push: false
-          tags: duplex-sync-server:${{ github.sha }}
+          tags: parity-server:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -146,6 +146,6 @@ jobs:
         with:
           context: ./client
           push: false
-          tags: duplex-sync-client:${{ github.sha }}
+          tags: parity-client:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

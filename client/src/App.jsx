@@ -151,7 +151,7 @@ function App() {
         <header className="flex items-center justify-between border-b border-white/20 pb-4">
           <div className="flex items-center gap-3">
             <div>
-              <h1 className="text-2xl tracking-wide">duplex-sync-engine</h1>
+              <h1 className="text-2xl tracking-wide">parity</h1>
               <p className="text-sm text-white/60">Google Sheets ↔ MySQL live sync</p>
             </div>
           </div>
