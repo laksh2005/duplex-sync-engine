@@ -17,6 +17,9 @@ const DEBOUNCE_MS = Number(process.env.SYNC_DEBOUNCE_MS || 750)
 const DIRTY_KEY = 'duplex:sync:dirty'
 const CHANGED_AT_KEY = 'duplex:sync:changed_at'
 
+// An unclaimed edit timestamp older than this is meaningless for latency.
+const CHANGED_AT_TTL_SECONDS = Number(process.env.SYNC_CHANGED_AT_TTL_SECONDS || 900)
+
 let queue = null
 let connection = null
 
@@ -60,8 +63,11 @@ async function enqueueSync({ reason = 'manual', changedAt = null } = {}) {
 
   if (changedAt) {
     // NX keeps the earliest edit in a burst, so latency is measured from the
-    // first change rather than the last.
-    await redis.set(CHANGED_AT_KEY, String(changedAt), 'NX')
+    // first change rather than the last. The TTL matters: if a process dies
+    // between setting this and claiming it, the next sync would otherwise
+    // attribute all the dead time to edit-to-sync latency. Losing the marker
+    // just means that one sync reports no latency sample.
+    await redis.set(CHANGED_AT_KEY, String(changedAt), 'EX', CHANGED_AT_TTL_SECONDS, 'NX')
   }
 
   const job = await q.add(JOB_NAME, { reason }, { jobId: DEDUPE_JOB_ID, delay: DEBOUNCE_MS })

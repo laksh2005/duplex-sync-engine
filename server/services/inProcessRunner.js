@@ -1,5 +1,4 @@
 const { executeSync } = require('./syncEngine')
-const { recordSyncMetric } = require('./dbService')
 const { broadcastStatus } = require('../websocket')
 const { logError, logInfo } = require('../utils/logger')
 
@@ -20,7 +19,6 @@ async function drain() {
   try {
     const result = await executeSync(job)
     if (!result.skipped) {
-      await recordSyncMetric({ ...result, reason: job.reason })
       logInfo(
         `sync ok reason=${job.reason} rows=${result.rowsProcessed} duration=${result.durationMs}ms` +
           (result.latencyMs != null ? ` latency=${result.latencyMs}ms` : '')

@@ -1,5 +1,4 @@
 const { executeSync } = require('../services/syncEngine')
-const { recordSyncMetric } = require('../services/dbService')
 const { claimPendingChange } = require('./syncQueue')
 const { logInfo } = require('../utils/logger')
 
@@ -15,7 +14,6 @@ async function processSyncJob(job, redis) {
   const result = await executeSync({ reason, changedAt: claimed.changedAt })
 
   if (!result.skipped) {
-    await recordSyncMetric({ ...result, reason })
     logInfo(
       `sync ok job=${job.id} attempt=${job.attemptsMade + 1} reason=${reason} ` +
         `rows=${result.rowsProcessed} written=${result.rowsWritten} duration=${result.durationMs}ms` +

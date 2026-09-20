@@ -18,9 +18,11 @@ module.exports = [
         Buffer: 'readonly',
         __dirname: 'readonly',
         setTimeout: 'readonly',
+        clearTimeout: 'readonly',
         setInterval: 'readonly',
         clearInterval: 'readonly',
         setImmediate: 'readonly',
+        URL: 'readonly',
         fetch: 'readonly'
       }
     },

@@ -9,7 +9,8 @@ const {
   writeSyncLogs,
   writeConflictLogs,
   getMetadata,
-  setMetadata
+  setMetadata,
+  recordSyncMetric
 } = require('./dbService')
 const { computeSyncPlan } = require('./syncPlanner')
 const { broadcastStatus, broadcastSyncEvent, broadcastConflictEvent } = require('../websocket')
@@ -105,6 +106,10 @@ async function executeSync({ reason = 'manual', changedAt = null } = {}) {
     latencyMs: changedAt ? finishedAt - Number(changedAt) : null,
     lastSyncTime
   }
+
+  // Recorded before the event fires, so anything reacting to a finished sync
+  // already sees its metric row.
+  await recordSyncMetric({ ...result, reason })
 
   syncEvents.emit('completed', result)
   return result
