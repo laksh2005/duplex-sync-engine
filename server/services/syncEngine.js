@@ -1,3 +1,4 @@
+const EventEmitter = require('events')
 const { fetchSheet, toRowObjects, writeRowsToSheet } = require('./sheetService')
 const {
   initSchema,
@@ -17,6 +18,10 @@ const { getDynamicColumns } = require('../utils/columns')
 
 const LAST_SYNC_KEY = 'last_sync_time'
 const SYNCED_IDS_KEY = 'synced_row_ids'
+
+// Lets the DB change detector re-baseline after a sync, so the writes a sync
+// makes are never mistaken for a user edit and re-trigger another sync.
+const syncEvents = new EventEmitter()
 
 async function initSyncEngine() {
   await initSchema()
@@ -51,7 +56,9 @@ async function executeSync({ reason = 'manual', changedAt = null } = {}) {
   if (!headers || !headers.length) {
     const lastSyncTime = await getMetadata(LAST_SYNC_KEY)
     broadcastStatus({ status: 'idle', lastSyncTime })
-    return { skipped: true, reason: 'empty_sheet', durationMs: Date.now() - startedAt }
+    const skipped = { skipped: true, reason: 'empty_sheet', durationMs: Date.now() - startedAt }
+    syncEvents.emit('completed', skipped)
+    return skipped
   }
 
   await ensureColumnsForHeaders(headers)
@@ -86,7 +93,7 @@ async function executeSync({ reason = 'manual', changedAt = null } = {}) {
 
   broadcastStatus({ status: 'idle', lastSyncTime })
 
-  return {
+  const result = {
     skipped: false,
     reason,
     stats: plan.stats,
@@ -98,11 +105,15 @@ async function executeSync({ reason = 'manual', changedAt = null } = {}) {
     latencyMs: changedAt ? finishedAt - Number(changedAt) : null,
     lastSyncTime
   }
+
+  syncEvents.emit('completed', result)
+  return result
 }
 
 module.exports = {
   initSyncEngine,
   executeSync,
+  syncEvents,
   LAST_SYNC_KEY,
   SYNCED_IDS_KEY
 }

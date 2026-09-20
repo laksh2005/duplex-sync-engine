@@ -18,6 +18,9 @@ const runWorkerInline = useQueue && process.env.RUN_WORKER_INLINE !== '0'
 async function initRunner() {
   if (!useQueue) {
     await inProcess.initRunner()
+    // The detector must live in the process that runs syncs, so it can
+    // re-baseline on completion.
+    require('./changeDetector').startChangeDetector(enqueueSync)
     logInfo('sync runner: in-process (set REDIS_URL to use the queue)')
     return { mode: 'in-process' }
   }

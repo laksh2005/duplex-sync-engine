@@ -48,11 +48,16 @@ function startWorker() {
 
   worker.on('error', err => logError(err))
 
+  // The detector runs here rather than in the API process: it re-baselines off
+  // the sync-completed event, which only fires where executeSync actually runs.
+  require('../services/changeDetector').startChangeDetector(enqueueSync)
+
   logInfo(`sync worker started (queue=${QUEUE_NAME}, concurrency=1)`)
   return worker
 }
 
 async function stopWorker() {
+  require('../services/changeDetector').stopChangeDetector()
   if (worker) {
     await worker.close()
     worker = null
@@ -67,9 +72,7 @@ module.exports = { startWorker, stopWorker }
 
 // Allow `npm run worker` to run this file as a standalone process.
 if (require.main === module) {
-  const dotenv = require('dotenv')
-  const path = require('path')
-  dotenv.config({ path: path.join(__dirname, '../.env') })
+  require('../config/env')
 
   const { initSyncEngine } = require('../services/syncEngine')
 
