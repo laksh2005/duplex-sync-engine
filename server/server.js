@@ -1,15 +1,11 @@
+require('./config/env')
+
 const http = require('http')
-const dotenv = require('dotenv')
-const path = require('path')
 const app = require('./app')
 const { initSyncEngine } = require('./services/syncEngine')
 const { initRunner, shutdownRunner } = require('./services/runner')
 const { initWebSocket } = require('./websocket')
 const { logError, logInfo } = require('./utils/logger')
-
-dotenv.config({
-  path: path.join(__dirname, '.env')
-})
 
 const port = Number(process.env.PORT || 4000)
 

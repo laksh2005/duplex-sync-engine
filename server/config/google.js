@@ -1,10 +1,5 @@
 const { google } = require('googleapis')
-const dotenv = require('dotenv')
-const path = require('path')
-
-dotenv.config({
-  path: path.join(__dirname, '../.env')
-})
+require('./env')
 
 async function getSheetsClient() {
   const clientEmail = process.env.GOOGLE_CLIENT_EMAIL
