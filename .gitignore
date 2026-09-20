@@ -1,0 +1,16 @@
+node_modules/
+dist/
+coverage/
+
+# Never commit real credentials; server/.env.example is the template.
+.env
+.env.local
+.env.*.local
+
+*.log
+npm-debug.log*
+
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/

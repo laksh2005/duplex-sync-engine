@@ -1,0 +1,100 @@
+# Brings up the whole stack: MySQL, Redis, the API, a dedicated sync worker and
+# the dashboard behind nginx.
+#
+#   cp server/.env.example server/.env   # fill in the Google Sheets values
+#   docker compose up --build
+#
+# Dashboard: http://localhost:8080    API: http://localhost:4000/api/health
+
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-duplex}
+      MYSQL_DATABASE: ${DB_NAME:-duplex_sync}
+    ports:
+      - '${DB_PORT:-3306}:3306'
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', '127.0.0.1', '-p${DB_PASSWORD:-duplex}']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  server:
+    build:
+      context: ./server
+    restart: unless-stopped
+    env_file:
+      - path: ./server/.env
+        required: false
+    environment:
+      PORT: 4000
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: ${DB_PASSWORD:-duplex}
+      DB_NAME: ${DB_NAME:-duplex_sync}
+      REDIS_URL: redis://redis:6379
+      # The worker service below owns job processing.
+      RUN_WORKER_INLINE: '0'
+    ports:
+      - '${PORT:-4000}:4000'
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ./server
+    restart: unless-stopped
+    command: ['node', 'queue/worker.js']
+    env_file:
+      - path: ./server/.env
+        required: false
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: ${DB_PASSWORD:-duplex}
+      DB_NAME: ${DB_NAME:-duplex_sync}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  client:
+    build:
+      context: ./client
+      args:
+        VITE_API_URL: /api
+    restart: unless-stopped
+    ports:
+      - '${CLIENT_PORT:-8080}:80'
+    depends_on:
+      - server
+
+volumes:
+  mysql_data:
+  redis_data:

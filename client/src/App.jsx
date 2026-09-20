@@ -3,7 +3,21 @@ import { Activity, Database, Sheet, RefreshCw } from 'lucide-react'
 import './App.css'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000/api'
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:4000/ws'
+
+// Behind the nginx proxy the socket is same-origin, so derive it from the page
+// rather than hardcoding a host. Falls back to the dev server port.
+function resolveWsUrl() {
+  if (import.meta.env.VITE_WS_URL) {
+    return import.meta.env.VITE_WS_URL
+  }
+  if (API_BASE_URL.startsWith('/')) {
+    const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${scheme}//${window.location.host}/ws`
+  }
+  return 'ws://localhost:4000/ws'
+}
+
+const WS_URL = resolveWsUrl()
 
 function useWebSocket(onMessage) {
   useEffect(() => {
