@@ -211,7 +211,7 @@ function App() {
                     <span>
                       {item.type === 'sync_summary'
                         ? `Sync: ${item.summary}`
-                        : `${item.type === 'sync_event' ? 'Sync' : 'Conflict'} ${item.payload?.id ?? '—'} ${item.payload?.action ?? item.payload?.winner ?? ''}`}
+                        : `${item.type === 'sync_event' ? 'Sync' : 'Conflict'} ${item.payload?.id ?? '-'} ${item.payload?.action ?? item.payload?.winner ?? ''}`}
                     </span>
                     <span className="text-white/40 tabular-nums">
                       {new Date(item.timestamp).toLocaleTimeString()}
