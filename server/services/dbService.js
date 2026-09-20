@@ -6,9 +6,22 @@ const SYNC_TABLE = 'synced_rows'
 const SYNC_LOGS_TABLE = 'sync_logs'
 const CONFLICT_LOGS_TABLE = 'conflict_logs'
 const METADATA_TABLE = 'metadata'
+const METRICS_TABLE = 'sync_metrics'
+
+// Rows per INSERT statement. Keeps each statement well under max_allowed_packet
+// while still making large syncs a handful of round trips instead of thousands.
+const CHUNK_SIZE = Number(process.env.SYNC_CHUNK_SIZE || 500)
 
 function quoteId(name) {
   return '`' + String(name).replace(/`/g, '``') + '`'
+}
+
+function chunk(items, size) {
+  const out = []
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size))
+  }
+  return out
 }
 
 async function initSchema() {
@@ -33,7 +46,8 @@ async function initSchema() {
         message text,
         created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
-        KEY idx_row_id (row_id)
+        KEY idx_row_id (row_id),
+        KEY idx_created_at (created_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
     )
 
@@ -59,17 +73,41 @@ async function initSchema() {
         PRIMARY KEY (\`key\`)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
     )
+
+    await conn.query(
+      `CREATE TABLE IF NOT EXISTS ${METRICS_TABLE} (
+        id bigint unsigned NOT NULL AUTO_INCREMENT,
+        reason varchar(32),
+        rows_processed int unsigned NOT NULL DEFAULT 0,
+        rows_written int unsigned NOT NULL DEFAULT 0,
+        duration_ms int unsigned NOT NULL DEFAULT 0,
+        latency_ms int unsigned NULL,
+        created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_created_at (created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+    )
   } finally {
     conn.release()
   }
 }
 
-async function getExistingColumns() {
-  const [rows] = await pool.query(
+async function getExistingColumns(conn = pool) {
+  const [rows] = await conn.query(
     `SELECT COLUMN_NAME FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ?`,
     [SYNC_TABLE]
   )
   return rows.map(r => r.COLUMN_NAME)
+}
+
+async function addMissingColumns(conn, keys) {
+  const existing = await getExistingColumns(conn)
+  const toAdd = keys.filter(key => !existing.includes(key))
+  if (!toAdd.length) {
+    return
+  }
+  const alters = toAdd.map(key => `ADD COLUMN ${quoteId(key)} varchar(255) NULL`).join(', ')
+  await conn.query(`ALTER TABLE ${SYNC_TABLE} ${alters}`)
 }
 
 async function ensureColumnsForHeaders(headers) {
@@ -77,15 +115,7 @@ async function ensureColumnsForHeaders(headers) {
   if (!dynamicColumns.length) {
     return
   }
-  const existing = await getExistingColumns()
-  const toAdd = dynamicColumns.filter(c => !existing.includes(c.key))
-  if (!toAdd.length) {
-    return
-  }
-  const alters = toAdd
-    .map(c => `ADD COLUMN ${quoteId(c.key)} varchar(255) NULL`)
-    .join(', ')
-  await pool.query(`ALTER TABLE ${SYNC_TABLE} ${alters}`)
+  await addMissingColumns(pool, dynamicColumns.map(c => c.key))
 }
 
 async function getAllRows() {
@@ -98,64 +128,69 @@ async function getActiveRows() {
   return rows
 }
 
+function normalizeUpdatedAt(value) {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? new Date() : value
+  }
+  if (value == null) {
+    return new Date()
+  }
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed
+}
+
+/**
+ * Upserts rows in chunks inside a single transaction. Chunking matters at scale:
+ * one statement per row turns a 10K row sync into 10K round trips.
+ */
 async function upsertRows(rows) {
   if (!rows.length) {
-    return
+    return { written: 0, batches: 0 }
   }
+
+  const dynamicKeys = [
+    ...new Set(
+      rows.flatMap(row => Object.keys(row).filter(key => !RESERVED_COLUMNS.includes(key)))
+    )
+  ]
+
   const conn = await getConnection()
   try {
     await conn.beginTransaction()
-
-    const existingColumns = await getExistingColumns()
-    const dynamicKeys = Object.keys(
-      rows.reduce((acc, row) => {
-        Object.keys(row).forEach(key => {
-          if (!RESERVED_COLUMNS.includes(key)) {
-            acc[key] = true
-          }
-        })
-        return acc
-      }, {})
-    )
-
-    const toAdd = dynamicKeys.filter(k => !existingColumns.includes(k))
-    if (toAdd.length) {
-      const alters = toAdd.map(k => `ADD COLUMN ${quoteId(k)} varchar(255) NULL`).join(', ')
-      await conn.query(`ALTER TABLE ${SYNC_TABLE} ${alters}`)
-    }
+    await addMissingColumns(conn, dynamicKeys)
 
     const columns = ['id', 'updated_at', 'checksum', 'deleted', ...dynamicKeys]
-    const quotedColumns = columns.map(quoteId)
-    const placeholders = columns.map(() => '?').join(', ')
+    const quotedColumns = columns.map(quoteId).join(', ')
+    const rowPlaceholder = `(${columns.map(() => '?').join(', ')})`
     const updates = columns
-      .filter(c => c !== 'id')
-      .map(c => `${quoteId(c)}=VALUES(${quoteId(c)})`)
+      .filter(col => col !== 'id')
+      .map(col => `${quoteId(col)}=VALUES(${quoteId(col)})`)
       .join(', ')
 
-    const sql = `INSERT INTO ${SYNC_TABLE} (${quotedColumns.join(', ')}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE ${updates}`
+    const batches = chunk(rows, CHUNK_SIZE)
+    for (const batch of batches) {
+      const sql =
+        `INSERT INTO ${SYNC_TABLE} (${quotedColumns}) ` +
+        `VALUES ${batch.map(() => rowPlaceholder).join(', ')} ` +
+        `ON DUPLICATE KEY UPDATE ${updates}`
 
-    const batch = rows.map(row =>
-      columns.map(col => {
-        if (col === 'updated_at') {
-          // Ensure updated_at is always a valid Date object
-          if (row[col] instanceof Date) {
-            return row[col]
+      const params = batch.flatMap(row =>
+        columns.map(col => {
+          if (col === 'updated_at') {
+            return normalizeUpdatedAt(row[col])
           }
-          if (row[col] != null) {
-            const date = new Date(row[col])
-            // If date is invalid, use current date
-            return isNaN(date.getTime()) ? new Date() : date
+          if (col === 'deleted') {
+            return row[col] ? 1 : 0
           }
-          // Default to current date if null/undefined
-          return new Date()
-        }
-        return row[col] != null ? row[col] : null
-      })
-    )
+          return row[col] != null ? row[col] : null
+        })
+      )
 
-    await conn.query(sql, batch.flat())
+      await conn.query(sql, params)
+    }
 
     await conn.commit()
+    return { written: rows.length, batches: batches.length }
   } catch (err) {
     await conn.rollback()
     logError(err)
@@ -165,40 +200,93 @@ async function upsertRows(rows) {
   }
 }
 
-async function deleteRow(id) {
-  await pool.query(`DELETE FROM ${SYNC_TABLE} WHERE id = ?`, [id])
+async function deleteRows(ids) {
+  if (!ids.length) {
+    return { deleted: 0 }
+  }
+  for (const batch of chunk(ids, CHUNK_SIZE)) {
+    await pool.query(
+      `DELETE FROM ${SYNC_TABLE} WHERE id IN (${batch.map(() => '?').join(', ')})`,
+      batch
+    )
+  }
+  return { deleted: ids.length }
 }
 
-async function writeSyncLog(entry) {
-  const { row_id, source, action, status, message } = entry
+async function writeSyncLogs(entries) {
+  if (!entries.length) {
+    return
+  }
+  try {
+    for (const batch of chunk(entries, CHUNK_SIZE)) {
+      await pool.query(
+        `INSERT INTO ${SYNC_LOGS_TABLE} (row_id, source, action, status, message) VALUES ${batch
+          .map(() => '(?, ?, ?, ?, ?)')
+          .join(', ')}`,
+        batch.flatMap(e => [e.row_id || null, e.source || null, e.action || null, e.status || null, e.message || null])
+      )
+    }
+  } catch (err) {
+    // Logging must never fail a sync that otherwise succeeded.
+    logError(err)
+  }
+}
+
+async function writeConflictLogs(entries) {
+  if (!entries.length) {
+    return
+  }
+  try {
+    for (const batch of chunk(entries, CHUNK_SIZE)) {
+      await pool.query(
+        `INSERT INTO ${CONFLICT_LOGS_TABLE} (row_id, sheet_updated_at, db_updated_at, winner, details) VALUES ${batch
+          .map(() => '(?, ?, ?, ?, ?)')
+          .join(', ')}`,
+        batch.flatMap(e => [
+          e.row_id || null,
+          e.sheet_updated_at || null,
+          e.db_updated_at || null,
+          e.winner || null,
+          e.details || null
+        ])
+      )
+    }
+  } catch (err) {
+    logError(err)
+  }
+}
+
+async function recordSyncMetric({ reason, rowsProcessed, rowsWritten, durationMs, latencyMs }) {
   try {
     await pool.query(
-      `INSERT INTO ${SYNC_LOGS_TABLE} (row_id, source, action, status, message) VALUES (?, ?, ?, ?, ?)`,
-      [row_id || null, source || null, action || null, status || null, message || null]
+      `INSERT INTO ${METRICS_TABLE} (reason, rows_processed, rows_written, duration_ms, latency_ms) VALUES (?, ?, ?, ?, ?)`,
+      [reason || null, rowsProcessed || 0, rowsWritten || 0, durationMs || 0, latencyMs != null ? latencyMs : null]
     )
   } catch (err) {
     logError(err)
   }
 }
 
-async function writeConflictLog(entry) {
-  const { row_id, sheet_updated_at, db_updated_at, winner, details } = entry
-  try {
-    await pool.query(
-      `INSERT INTO ${CONFLICT_LOGS_TABLE} (row_id, sheet_updated_at, db_updated_at, winner, details) VALUES (?, ?, ?, ?, ?)`,
-      [row_id || null, sheet_updated_at || null, db_updated_at || null, winner || null, details || null]
-    )
-  } catch (err) {
-    logError(err)
-  }
+async function getRecentMetrics(limit = 50) {
+  const [rows] = await pool.query(
+    `SELECT reason, rows_processed, rows_written, duration_ms, latency_ms, created_at
+     FROM ${METRICS_TABLE} ORDER BY id DESC LIMIT ?`,
+    [Number(limit)]
+  )
+  return rows
+}
+
+async function getRecentSyncLogs(limit = 50) {
+  const [rows] = await pool.query(
+    `SELECT row_id, source, action, status, created_at FROM ${SYNC_LOGS_TABLE} ORDER BY id DESC LIMIT ?`,
+    [Number(limit)]
+  )
+  return rows
 }
 
 async function getMetadata(key) {
   const [rows] = await pool.query(`SELECT \`value\` FROM ${METADATA_TABLE} WHERE \`key\` = ?`, [key])
-  if (!rows.length) {
-    return null
-  }
-  return rows[0].value
+  return rows.length ? rows[0].value : null
 }
 
 async function setMetadata(key, value) {
@@ -211,17 +299,22 @@ async function setMetadata(key, value) {
 module.exports = {
   initSchema,
   ensureColumnsForHeaders,
+  getExistingColumns,
   getAllRows,
   getActiveRows,
   upsertRows,
-  deleteRow,
-  writeSyncLog,
-  writeConflictLog,
+  deleteRows,
+  writeSyncLogs,
+  writeConflictLogs,
+  recordSyncMetric,
+  getRecentMetrics,
+  getRecentSyncLogs,
   getMetadata,
   setMetadata,
+  CHUNK_SIZE,
   SYNC_TABLE,
   SYNC_LOGS_TABLE,
   CONFLICT_LOGS_TABLE,
-  METADATA_TABLE
+  METADATA_TABLE,
+  METRICS_TABLE
 }
-

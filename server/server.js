@@ -2,10 +2,10 @@ const http = require('http')
 const dotenv = require('dotenv')
 const path = require('path')
 const app = require('./app')
-const { initSchema } = require('./services/dbService')
+const { initSyncEngine } = require('./services/syncEngine')
+const { initRunner, shutdownRunner } = require('./services/runner')
 const { initWebSocket } = require('./websocket')
-const { startSyncLoop } = require('./services/syncEngine')
-const { logError } = require('./utils/logger')
+const { logError, logInfo } = require('./utils/logger')
 
 dotenv.config({
   path: path.join(__dirname, '.env')
@@ -14,17 +14,32 @@ dotenv.config({
 const port = Number(process.env.PORT || 4000)
 
 async function start() {
-  try {
-    await initSchema()
-    const server = http.createServer(app)
-    initWebSocket(server)
-    await startSyncLoop()
-    server.listen(port)
-  } catch (err) {
-    logError(err)
-    process.exit(1)
+  await initSyncEngine()
+
+  const server = http.createServer(app)
+  initWebSocket(server)
+
+  const runner = await initRunner()
+  server.listen(port, () => {
+    logInfo(`server listening on :${port} (runner=${runner.mode})`)
+  })
+
+  const shutdown = async signal => {
+    logInfo(`received ${signal}, shutting down`)
+    server.close()
+    try {
+      await shutdownRunner()
+    } catch (err) {
+      logError(err)
+    }
+    process.exit(0)
   }
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'))
+  process.on('SIGINT', () => shutdown('SIGINT'))
 }
 
-start()
-
+start().catch(err => {
+  logError(err)
+  process.exit(1)
+})

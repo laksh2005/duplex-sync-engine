@@ -4,175 +4,105 @@ const {
   ensureColumnsForHeaders,
   getAllRows,
   upsertRows,
-  deleteRow,
-  writeSyncLog,
-  writeConflictLog,
+  deleteRows,
+  writeSyncLogs,
+  writeConflictLogs,
   getMetadata,
   setMetadata
 } = require('./dbService')
-const { resolveConflict } = require('./conflictResolver')
+const { computeSyncPlan } = require('./syncPlanner')
 const { broadcastStatus, broadcastSyncEvent, broadcastConflictEvent } = require('../websocket')
 const { logError } = require('../utils/logger')
-const { getDynamicColumns, sanitizeColumnName } = require('../utils/columns')
+const { getDynamicColumns } = require('../utils/columns')
 
-let syncing = false
-let scheduled = false
+const LAST_SYNC_KEY = 'last_sync_time'
+const SYNCED_IDS_KEY = 'synced_row_ids'
 
-function scheduleSync(reason) {
-  if (scheduled) {
-    return
-  }
-  scheduled = true
-  setTimeout(() => {
-    runSync(reason).catch(logError)
-  }, 200)
-}
-
-async function startSyncLoop() {
+async function initSyncEngine() {
   await initSchema()
 }
 
-async function runSync(reason) {
-  if (syncing) {
-    scheduled = true
-    return
-  }
-  syncing = true
-  scheduled = false
-  broadcastStatus({ status: 'syncing', reason })
+async function readLastSyncedIds() {
   try {
-    const lastSync = await getMetadata('last_sync_time')
-    let lastSyncedIds = null
-    try {
-      const syncedIdsRaw = await getMetadata('synced_row_ids')
-      if (syncedIdsRaw) {
-        const arr = JSON.parse(syncedIdsRaw)
-        lastSyncedIds = Array.isArray(arr) ? new Set(arr) : null
-      }
-    } catch (_) {
-      lastSyncedIds = null
+    const raw = await getMetadata(SYNCED_IDS_KEY)
+    if (!raw) {
+      return null
     }
-    const { headers, rows: sheetRowsRaw } = await fetchSheet()
-    if (!headers || !headers.length) {
-      broadcastStatus({ status: 'idle', lastSyncTime: await getMetadata('last_sync_time') })
-      return
-    }
-    await ensureColumnsForHeaders(headers)
-    const sheetRows = toRowObjects(headers, sheetRowsRaw)
-    const dbRows = await getAllRows()
-    const dbById = dbRows.reduce((acc, row) => {
-      acc[String(row.id)] = row
-      return acc
-    }, {})
-    const sheetById = sheetRows.reduce((acc, row) => {
-      acc[String(row.id)] = row
-      return acc
-    }, {})
-    const allIds = new Set([...Object.keys(dbById), ...Object.keys(sheetById)])
-    const upserts = []
-    const idsToDeleteFromDb = []
-    const finalRowsForSheet = []
-    const dynamicColumns = getDynamicColumns(headers)
-    const headerKeys = ['id', 'updated_at', 'deleted', ...dynamicColumns.map(c => c.header)]
-    allIds.forEach(id => {
-      const sheetRow = sheetById[id]
-      const dbRow = dbById[id]
-      if (sheetRow && !dbRow) {
-        // Row in sheet but not in DB: either new in sheet, or deleted from DB
-        if (lastSyncedIds && lastSyncedIds.has(id)) {
-          // Was synced before → user deleted from DB → remove from sheet (don't add to finalRowsForSheet)
-          writeSyncLog({ row_id: id, source: 'db', action: 'delete', status: 'success', message: null })
-          broadcastSyncEvent({ id, source: 'db', action: 'delete' })
-          return
-        }
-        upserts.push(sheetRow)
-        writeSyncLog({ row_id: id, source: 'sheet', action: 'insert', status: 'success', message: null })
-        broadcastSyncEvent({ id, source: 'sheet', action: 'insert' })
-        finalRowsForSheet.push(sheetRow)
-        return
-      }
-      if (!sheetRow && dbRow) {
-        if (dbRow.deleted) {
-          writeSyncLog({ row_id: id, source: 'db', action: 'delete', status: 'success', message: null })
-          broadcastSyncEvent({ id, source: 'db', action: 'delete' })
-          return
-        }
-        if (lastSyncedIds && lastSyncedIds.has(id)) {
-          // Was synced before but now only in DB → user deleted from sheet → delete from DB
-          idsToDeleteFromDb.push(id)
-          writeSyncLog({ row_id: id, source: 'sheet', action: 'delete', status: 'success', message: null })
-          broadcastSyncEvent({ id, source: 'sheet', action: 'delete' })
-          return
-        }
-        finalRowsForSheet.push(dbRow)
-        writeSyncLog({ row_id: id, source: 'db', action: 'insert', status: 'success', message: null })
-        broadcastSyncEvent({ id, source: 'db', action: 'insert' })
-        upserts.push(dbRow)
-        return
-      }
-      if (sheetRow && dbRow) {
-        if (sheetRow.checksum === dbRow.checksum) {
-          finalRowsForSheet.push(dbRow)
-          return
-        }
-        const resolution = resolveConflict(sheetRow, dbRow)
-        const resolved = resolution.resolved
-        const winner = resolution.winner
-        writeConflictLog({
-          row_id: id,
-          sheet_updated_at: resolution.sheetUpdated,
-          db_updated_at: resolution.dbUpdated,
-          winner,
-          details: null
-        })
-        broadcastConflictEvent({
-          id,
-          sheet_updated_at: resolution.sheetUpdated,
-          db_updated_at: resolution.dbUpdated,
-          winner
-        })
-        writeSyncLog({
-          row_id: id,
-          source: winner,
-          action: 'update',
-          status: 'success',
-          message: null
-        })
-        broadcastSyncEvent({ id, source: winner, action: 'update' })
-        upserts.push(resolved)
-        finalRowsForSheet.push(resolved)
-      }
-    })
-    for (const id of idsToDeleteFromDb) {
-      await deleteRow(id)
-    }
-    if (upserts.length) {
-      await upsertRows(upserts)
-    }
-    const headersForSheet = headerKeys
-    await writeRowsToSheet(headersForSheet, finalRowsForSheet)
-    const now = new Date().toISOString()
-    await setMetadata('last_sync_time', now)
-    await setMetadata('synced_row_ids', JSON.stringify(finalRowsForSheet.map(r => r.id)))
-    broadcastStatus({ status: 'idle', lastSyncTime: now })
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? new Set(parsed.map(String)) : null
   } catch (err) {
     logError(err)
-    broadcastStatus({ status: 'error' })
-  } finally {
-    syncing = false
-    if (scheduled) {
-      scheduled = false
-      runSync('queued').catch(logError)
-    }
+    return null
   }
 }
 
-async function forceSync() {
-  scheduleSync('manual')
+/**
+ * Runs one full sync pass: read both sides, plan the diff, apply it, persist
+ * the logs. Returns a summary the caller can turn into metrics. Throws on
+ * failure so the queue can retry it.
+ */
+async function executeSync({ reason = 'manual', changedAt = null } = {}) {
+  const startedAt = Date.now()
+  broadcastStatus({ status: 'syncing', reason })
+
+  const lastSyncedIds = await readLastSyncedIds()
+  const { headers, rows: rawSheetRows } = await fetchSheet()
+
+  if (!headers || !headers.length) {
+    const lastSyncTime = await getMetadata(LAST_SYNC_KEY)
+    broadcastStatus({ status: 'idle', lastSyncTime })
+    return { skipped: true, reason: 'empty_sheet', durationMs: Date.now() - startedAt }
+  }
+
+  await ensureColumnsForHeaders(headers)
+
+  const sheetRows = toRowObjects(headers, rawSheetRows)
+  const dbRows = await getAllRows()
+  const plan = computeSyncPlan({ sheetRows, dbRows, lastSyncedIds })
+
+  if (plan.deleteFromDb.length) {
+    await deleteRows(plan.deleteFromDb)
+  }
+  if (plan.upserts.length) {
+    await upsertRows(plan.upserts)
+  }
+
+  const sheetHeaders = ['id', 'updated_at', 'deleted', ...getDynamicColumns(headers).map(c => c.header)]
+  await writeRowsToSheet(sheetHeaders, plan.sheetRows)
+
+  await writeSyncLogs(plan.events.map(event => ({ ...event, status: 'success', message: null })))
+  await writeConflictLogs(plan.conflicts)
+
+  plan.events.forEach(event => broadcastSyncEvent({ id: event.row_id, source: event.source, action: event.action }))
+  plan.conflicts.forEach(conflict => broadcastConflictEvent({ id: conflict.row_id, ...conflict }))
+
+  const finishedAt = Date.now()
+  const lastSyncTime = new Date(finishedAt).toISOString()
+  await setMetadata(LAST_SYNC_KEY, lastSyncTime)
+  await setMetadata(SYNCED_IDS_KEY, JSON.stringify(plan.sheetRows.map(row => String(row.id))))
+
+  const durationMs = finishedAt - startedAt
+  const rowsProcessed = plan.sheetRows.length + plan.deleteFromDb.length
+
+  broadcastStatus({ status: 'idle', lastSyncTime })
+
+  return {
+    skipped: false,
+    reason,
+    stats: plan.stats,
+    rowsProcessed,
+    rowsWritten: plan.upserts.length,
+    durationMs,
+    // How long it took from the originating edit to the sync landing, which is
+    // the number that actually matters for "is this real time".
+    latencyMs: changedAt ? finishedAt - Number(changedAt) : null,
+    lastSyncTime
+  }
 }
 
 module.exports = {
-  startSyncLoop,
-  forceSync
+  initSyncEngine,
+  executeSync,
+  LAST_SYNC_KEY,
+  SYNCED_IDS_KEY
 }
-
