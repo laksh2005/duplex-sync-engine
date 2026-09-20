@@ -27,6 +27,39 @@ async function fetchSheet() {
   return { headers, rows }
 }
 
+// The dashboard hits /data/sheet and /data/db at the same time and both need
+// the sheet headers. A short TTL plus in-flight sharing collapses that into one
+// Google API call, which matters now that the dashboard refreshes on every
+// sync. The sync engine deliberately does not use this: it must always read
+// the sheet fresh.
+const READ_CACHE_TTL_MS = Number(process.env.SHEET_CACHE_TTL_MS || 2000)
+let cache = null
+let inFlight = null
+
+async function fetchSheetCached() {
+  if (cache && Date.now() - cache.at < READ_CACHE_TTL_MS) {
+    return cache.value
+  }
+  if (inFlight) {
+    return inFlight
+  }
+
+  inFlight = fetchSheet()
+    .then(value => {
+      cache = { at: Date.now(), value }
+      return value
+    })
+    .finally(() => {
+      inFlight = null
+    })
+
+  return inFlight
+}
+
+function clearSheetCache() {
+  cache = null
+}
+
 function toRowObjects(headers, rows) {
   const objects = []
   const dynamicColumns = getDynamicColumns(headers)
@@ -97,10 +130,15 @@ async function writeRowsToSheet(headers, rows) {
       values
     }
   })
+
+  // Anything we just wrote makes a cached read stale.
+  clearSheetCache()
 }
 
 module.exports = {
   fetchSheet,
+  fetchSheetCached,
+  clearSheetCache,
   toRowObjects,
   writeRowsToSheet
 }
