@@ -11,10 +11,12 @@ const SOURCE = {
   DB: 'db'
 }
 
+// First occurrence wins: a stray duplicate id typed further down the sheet
+// must not overwrite the existing row it collides with.
 function indexById(rows) {
   const map = new Map()
   rows.forEach(row => {
-    if (row && row.id != null) {
+    if (row && row.id != null && !map.has(String(row.id))) {
       map.set(String(row.id), row)
     }
   })

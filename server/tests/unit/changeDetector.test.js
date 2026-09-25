@@ -1,4 +1,25 @@
-const { differs } = require('../../services/changeDetector')
+const { differs, editedDuringSync } = require('../../services/changeDetector')
+
+describe('changeDetector.editedDuringSync', () => {
+  const startedAt = Date.parse('2026-09-09T11:09:12.600Z')
+
+  it('flags a row written after the sync read the table', () => {
+    expect(editedDuringSync({ maxUpdatedAt: Date.parse('2026-09-09T11:09:15Z') }, startedAt)).toBe(true)
+  })
+
+  it('flags a write in the same second, since datetime drops the fraction', () => {
+    expect(editedDuringSync({ maxUpdatedAt: Date.parse('2026-09-09T11:09:12Z') }, startedAt)).toBe(true)
+  })
+
+  it('ignores rows last touched before the sync started', () => {
+    expect(editedDuringSync({ maxUpdatedAt: Date.parse('2026-09-09T11:09:11Z') }, startedAt)).toBe(false)
+  })
+
+  it('is false for an empty table or a missing start time', () => {
+    expect(editedDuringSync({ maxUpdatedAt: null }, startedAt)).toBe(false)
+    expect(editedDuringSync({ maxUpdatedAt: startedAt }, null)).toBe(false)
+  })
+})
 
 const base = { rowCount: 3, contentHash: 'abc', maxUpdatedAt: 1000 }
 

@@ -20,6 +20,7 @@ let mockSheet = { headers: [], rows: [] }
 jest.mock('../../services/sheetService', () => {
   const actual = jest.requireActual('../../services/sheetService')
   const { sanitizeColumnName } = jest.requireActual('../../utils/columns')
+  const { formatReadable } = jest.requireActual('../../utils/time')
 
   const read = async () => ({ headers: [...mockSheet.headers], rows: mockSheet.rows.map(r => [...r]) })
 
@@ -34,7 +35,7 @@ jest.mock('../../services/sheetService', () => {
         headers.map(header => {
           const key = sanitizeColumnName(header)
           if (key === 'id') return row.id != null ? String(row.id) : ''
-          if (key === 'updated_at') return row.updated_at ? new Date(row.updated_at).toISOString() : ''
+          if (key === 'updated_at') return row.updated_at ? formatReadable(row.updated_at) : ''
           if (key === 'deleted') return row.deleted ? '1' : '0'
           return row[key] != null ? String(row[key]) : ''
         })
@@ -84,7 +85,8 @@ describeE2E('end to end: webhook to MySQL and back', () => {
     }, {})
   }
 
-  const sheetIds = () => mockSheet.rows.map(r => r[0])
+  const sheetIds = () => mockSheet.rows.map(r => r[mockSheet.headers.indexOf('id')])
+  const sheetCell = (rowIndex, header) => mockSheet.rows[rowIndex][mockSheet.headers.indexOf(header)]
 
   beforeAll(async () => {
     process.env.WEBHOOK_SECRET = SECRET
@@ -270,6 +272,9 @@ describeE2E('end to end: webhook to MySQL and back', () => {
         city: 'Delhi'
       }
     ])
+    // cell() builds rows in HEADERS order, so reset the headers too: the sync
+    // above rewrote the sheet in its own column order.
+    mockSheet.headers = [...HEADERS]
     mockSheet.rows = [cell('1', 'AliceFromSheet', 'Delhi', '2024-06-03T00:00:00.000Z')]
 
     done = nextSync()
@@ -278,7 +283,7 @@ describeE2E('end to end: webhook to MySQL and back', () => {
 
     expect(result.stats.conflicts).toBe(1)
     expect((await dbRowsById())['1'].name).toBe('AliceFromSheet')
-    expect(mockSheet.rows[0][3]).toBe('AliceFromSheet')
+    expect(sheetCell(0, 'name')).toBe('AliceFromSheet')
   })
 
   it('survives a large sheet in one pass', async () => {
@@ -306,4 +311,62 @@ describeE2E('end to end: webhook to MySQL and back', () => {
     expect(res.body.summary.samples).toBeGreaterThan(0)
     expect(res.body.runner.mode).toBe('bullmq')
   })
+  it('writes the sheet back as id, data columns, updated_at, deleted', async () => {
+    mockSheet.rows = [cell('1', 'Alice', 'Delhi')]
+
+    const done = nextSync()
+    await triggerWebhook().expect(202)
+    await done
+
+    expect(mockSheet.headers).toEqual(['id', 'name', 'city', 'updated_at', 'deleted'])
+  })
+
+  it('writes updated_at to the sheet as readable text that reads back to the same instant', async () => {
+    mockSheet.rows = [cell('1', 'Alice', 'Delhi', '2026-09-09T11:09:12.000Z')]
+
+    let done = nextSync()
+    await triggerWebhook().expect(202)
+    await done
+
+    expect(sheetCell(0, 'updated_at')).toMatch(/^\d{1,2}:\d{2}:\d{2} [AP]M, \d{1,2} [A-Z][a-z]{2} \d{4}$/)
+
+    // A second pass must parse that text back exactly, or the row would look
+    // changed on every sync.
+    done = nextSync()
+    await triggerWebhook().expect(202)
+    const second = await done
+    expect(second.stats.unchanged).toBe(1)
+    expect(second.rowsWritten).toBe(0)
+  })
+
+  it('does not erase a sheet edit that lands while a sync is running', async () => {
+    mockSheet.rows = [cell('1', 'Alice', 'Delhi')]
+    let done = nextSync()
+    await triggerWebhook().expect(202)
+    await done
+
+    // The first read of the next sync sees the sheet as-is; by the second read
+    // (just before the sheet is rewritten) the user has typed a new value.
+    const original = sheetService.fetchSheet.getMockImplementation()
+    let calls = 0
+    sheetService.fetchSheet.mockImplementation(async () => {
+      calls += 1
+      if (calls === 2) {
+        mockSheet.rows[0][mockSheet.headers.indexOf('name')] = 'EditedMidSync'
+        mockSheet.rows[0][mockSheet.headers.indexOf('updated_at')] = new Date(Date.now() + 1000).toISOString()
+      }
+      return original()
+    })
+
+    try {
+      done = nextSync(20000)
+      await triggerWebhook().expect(202)
+      await done
+    } finally {
+      sheetService.fetchSheet.mockImplementation(original)
+    }
+
+    expect(sheetCell(0, 'name')).toBe('EditedMidSync')
+    expect((await dbRowsById())['1'].name).toBe('EditedMidSync')
+  }, 30000)
 })

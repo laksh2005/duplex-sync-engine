@@ -8,6 +8,7 @@ const POLL_INTERVAL_MS = Number(process.env.DB_POLL_INTERVAL_MS || 5000)
 let timer = null
 let baseline = null
 let enqueue = null
+let syncing = false
 
 /**
  * Cheap summary of the table's contents. BIT_XOR over the row checksums catches
@@ -42,15 +43,36 @@ function differs(a, b) {
   return a.rowCount !== b.rowCount || a.contentHash !== b.contentHash || a.maxUpdatedAt !== b.maxUpdatedAt
 }
 
-async function refreshBaseline() {
-  try {
-    baseline = await readFingerprint()
-  } catch (err) {
-    logError(err)
+/**
+ * True when some row carries an updated_at at or after the moment a sync read
+ * the table, meaning it was written by someone else while that sync ran.
+ * Compared at whole-second precision because MySQL's datetime drops the
+ * fraction; the cost is at most one redundant sync when a sync's own write
+ * lands in the same second it started.
+ */
+function editedDuringSync(fingerprint, startedAt) {
+  if (!fingerprint || !fingerprint.maxUpdatedAt || !startedAt) {
+    return false
   }
+  return fingerprint.maxUpdatedAt >= Math.floor(startedAt / 1000) * 1000
+}
+
+function changedAtFor(fingerprint) {
+  // Prefer the row's own updated_at as the edit time when it is plausibly
+  // recent, otherwise fall back to detection time. Either way the reported
+  // latency includes the polling delay, which is the honest number for a
+  // polled source.
+  const now = Date.now()
+  const max = fingerprint.maxUpdatedAt
+  return max && max <= now && now - max < POLL_INTERVAL_MS * 4 ? max : now
 }
 
 async function tick() {
+  // A sync writes to this table itself. Polling mid-sync would mistake those
+  // writes for a user edit and queue a redundant sync.
+  if (syncing) {
+    return
+  }
   try {
     const current = await readFingerprint()
 
@@ -67,21 +89,32 @@ async function tick() {
     // change to be reported on every subsequent tick.
     baseline = current
 
-    // Prefer the row's own updated_at as the edit time when it is plausibly
-    // recent, otherwise fall back to detection time. Either way the reported
-    // latency includes the polling delay, which is the honest number for a
-    // polled source.
-    const now = Date.now()
-    const changedAt =
-      current.maxUpdatedAt && current.maxUpdatedAt <= now && now - current.maxUpdatedAt < POLL_INTERVAL_MS * 4
-        ? current.maxUpdatedAt
-        : now
-
     logInfo(`db change detected (rows=${current.rowCount}), queueing sync`)
-    await enqueue({ reason: 'db-poll', changedAt })
+    await enqueue({ reason: 'db-poll', changedAt: changedAtFor(current) })
   } catch (err) {
     logError(err)
   }
+}
+
+async function onSyncSettled({ startedAt } = {}) {
+  try {
+    const current = await readFingerprint()
+    baseline = current
+    // Re-baselining alone would silently absorb a DB edit made while the sync
+    // was running, since the sync read the table before it happened.
+    if (editedDuringSync(current, startedAt)) {
+      logInfo('db edited during sync, queueing follow-up')
+      await enqueue({ reason: 'db-poll', changedAt: changedAtFor(current) })
+    }
+  } catch (err) {
+    logError(err)
+  } finally {
+    syncing = false
+  }
+}
+
+function onSyncStarted() {
+  syncing = true
 }
 
 function startChangeDetector(enqueueSync) {
@@ -90,11 +123,8 @@ function startChangeDetector(enqueueSync) {
   }
   enqueue = enqueueSync
 
-  // A sync writes to the table itself. Re-baselining once it finishes stops
-  // those writes from looking like a user edit and triggering another sync.
-  syncEvents.on('completed', () => {
-    refreshBaseline().catch(logError)
-  })
+  syncEvents.on('started', onSyncStarted)
+  syncEvents.on('settled', onSyncSettled)
 
   timer = setInterval(() => {
     tick().catch(logError)
@@ -112,14 +142,17 @@ function stopChangeDetector() {
     clearInterval(timer)
     timer = null
   }
+  syncEvents.off('started', onSyncStarted)
+  syncEvents.off('settled', onSyncSettled)
   baseline = null
+  syncing = false
 }
 
 module.exports = {
   startChangeDetector,
   stopChangeDetector,
   readFingerprint,
-  refreshBaseline,
   differs,
+  editedDuringSync,
   POLL_INTERVAL_MS
 }

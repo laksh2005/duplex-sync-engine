@@ -87,6 +87,47 @@ describeDb('dbService against MySQL', () => {
     })
   })
 
+  describe('column order and readable view', () => {
+    const columnOrder = async () => {
+      const [rows] = await pool.query(
+        `SELECT COLUMN_NAME AS c FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = ? ORDER BY ORDINAL_POSITION`,
+        [db.SYNC_TABLE]
+      )
+      return rows.map(r => r.c)
+    }
+
+    it('orders the table as id, data columns, updated_at, deleted', async () => {
+      await db.ensureColumnsForHeaders(['id', 'value', 'updated_at', 'deleted'])
+      const order = await columnOrder()
+
+      expect(order[0]).toBe('id')
+      expect(order.indexOf('value')).toBeLessThan(order.indexOf('updated_at'))
+      expect(order.indexOf('updated_at')).toBeLessThan(order.indexOf('deleted'))
+    })
+
+    it('keeps updated_at a real DATETIME so date comparisons still work', async () => {
+      const [rows] = await pool.query(
+        `SELECT DATA_TYPE AS t FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = ? AND COLUMN_NAME = 'updated_at'`,
+        [db.SYNC_TABLE]
+      )
+      expect(rows[0].t).toBe('datetime')
+    })
+
+    it('exposes a view with the readable time in sheet column order', async () => {
+      await db.ensureColumnsForHeaders(['id', 'value', 'updated_at', 'deleted'])
+      await pool.query(
+        `INSERT INTO ${db.SYNC_TABLE} (id, value, updated_at, deleted, checksum)
+         VALUES ('1', 'Alpha', '2026-09-09 16:39:12', 0, 'x')`
+      )
+
+      const [rows] = await pool.query(`SELECT * FROM ${db.READABLE_VIEW}`)
+      expect(Object.keys(rows[0])).toEqual(['id', 'value', 'updated_at', 'deleted'])
+      expect(rows[0].updated_at).toBe('4:39:12 PM, 9 Sep 2026')
+    })
+  })
+
   describe('upsert', () => {
     it('writes every row of a multi-row batch', async () => {
       // Regression guard: the previous implementation built placeholders for a

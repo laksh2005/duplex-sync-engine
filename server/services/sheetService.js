@@ -1,6 +1,7 @@
 const { getSheetsClient } = require('../config/google')
 const { getDynamicColumns, sanitizeColumnName } = require('../utils/columns')
 const { computeChecksum } = require('../utils/checksum')
+const { formatReadable, parseTimestamp, systemTimeZone } = require('../utils/time')
 
 function getSheetConfig() {
   const spreadsheetId = process.env.GOOGLE_SHEET_ID
@@ -11,20 +12,23 @@ function getSheetConfig() {
   return { spreadsheetId, range }
 }
 
+// Readable timestamps carry no zone, so they are shown and read in the local
+// time of the machine running the server (IST on a laptop in India).
+// SYNC_TIMEZONE overrides it, e.g. when the server runs in a UTC container.
+function displayTimeZone() {
+  return (process.env.SYNC_TIMEZONE || '').trim() || systemTimeZone()
+}
+
 async function fetchSheet() {
   const sheets = await getSheetsClient()
   const { spreadsheetId, range } = getSheetConfig()
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range
-  })
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId, range })
+  const timeZone = displayTimeZone()
   const values = res.data.values || []
   if (!values.length) {
-    return { headers: [], rows: [] }
+    return { headers: [], rows: [], timeZone }
   }
-  const headers = values[0]
-  const rows = values.slice(1)
-  return { headers, rows }
+  return { headers: values[0], rows: values.slice(1), timeZone }
 }
 
 // The dashboard hits /data/sheet and /data/db at the same time and both need
@@ -60,7 +64,7 @@ function clearSheetCache() {
   cache = null
 }
 
-function toRowObjects(headers, rows) {
+function toRowObjects(headers, rows, timeZone = displayTimeZone()) {
   const objects = []
   const dynamicColumns = getDynamicColumns(headers)
   const headerIndex = headers.reduce((acc, header, idx) => {
@@ -82,7 +86,7 @@ function toRowObjects(headers, rows) {
     const updatedIndex = headerIndex.updated_at
     const deletedIndex = headerIndex.deleted
     const updatedRaw = updatedIndex != null ? cells[updatedIndex] : undefined
-    const updatedAt = updatedRaw ? new Date(updatedRaw) : new Date()
+    const updatedAt = parseTimestamp(updatedRaw, timeZone) || new Date()
     const deletedRaw = deletedIndex != null ? cells[deletedIndex] : undefined
     const deleted = deletedRaw === '1' || deletedRaw === 1 || deletedRaw === true ? 1 : 0
     const obj = { id: String(id), updated_at: updatedAt, deleted }
@@ -96,7 +100,7 @@ function toRowObjects(headers, rows) {
   return objects
 }
 
-async function writeRowsToSheet(headers, rows) {
+async function writeRowsToSheet(headers, rows, timeZone = displayTimeZone()) {
   const sheets = await getSheetsClient()
   const { spreadsheetId, range } = getSheetConfig()
   const finalHeaders = headers
@@ -108,7 +112,7 @@ async function writeRowsToSheet(headers, rows) {
       if (key === 'id') {
         cells.push(row.id != null ? String(row.id) : '')
       } else if (key === 'updated_at') {
-        cells.push(row.updated_at ? new Date(row.updated_at).toISOString() : '')
+        cells.push(row.updated_at ? formatReadable(row.updated_at, timeZone) : '')
       } else if (key === 'deleted') {
         cells.push(row.deleted ? '1' : '0')
       } else {
@@ -135,7 +139,13 @@ async function writeRowsToSheet(headers, rows) {
   clearSheetCache()
 }
 
+// id first, then the data columns, then the bookkeeping columns.
+function orderedSheetHeaders(headers) {
+  return ['id', ...getDynamicColumns(headers).map(c => c.header), 'updated_at', 'deleted']
+}
+
 module.exports = {
+  orderedSheetHeaders,
   fetchSheet,
   fetchSheetCached,
   clearSheetCache,

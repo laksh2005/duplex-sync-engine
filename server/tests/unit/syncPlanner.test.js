@@ -198,6 +198,19 @@ describe('computeSyncPlan', () => {
       expect(plan.stats.unchanged).toBe(1)
     })
 
+    it('keeps the first row when the sheet has a duplicate id', () => {
+      // A stray row typed further down with a clashing id must not overwrite
+      // the real row it collides with.
+      const plan = computeSyncPlan({
+        sheetRows: [makeRow({ id: '68', value: 'original' }), makeRow({ id: '68', value: 'stray' })],
+        dbRows: [],
+        lastSyncedIds: null
+      })
+
+      expect(plan.sheetRows).toHaveLength(1)
+      expect(plan.sheetRows[0].value).toBe('original')
+    })
+
     it('ignores rows without an id', () => {
       const plan = computeSyncPlan({
         sheetRows: [{ name: 'no id' }, makeRow({ id: '1' })],

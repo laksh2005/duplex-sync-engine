@@ -1,5 +1,5 @@
 const EventEmitter = require('events')
-const { fetchSheet, toRowObjects, writeRowsToSheet } = require('./sheetService')
+const { fetchSheet, toRowObjects, writeRowsToSheet, orderedSheetHeaders } = require('./sheetService')
 const {
   initSchema,
   ensureColumnsForHeaders,
@@ -15,7 +15,6 @@ const {
 const { computeSyncPlan } = require('./syncPlanner')
 const { broadcastStatus, broadcastSyncEvent, broadcastConflictEvent } = require('../websocket')
 const { logError } = require('../utils/logger')
-const { getDynamicColumns } = require('../utils/columns')
 
 const LAST_SYNC_KEY = 'last_sync_time'
 const SYNCED_IDS_KEY = 'synced_row_ids'
@@ -47,12 +46,28 @@ async function readLastSyncedIds() {
  * the logs. Returns a summary the caller can turn into metrics. Throws on
  * failure so the queue can retry it.
  */
-async function executeSync({ reason = 'manual', changedAt = null } = {}) {
+async function executeSync(options = {}) {
   const startedAt = Date.now()
+  syncEvents.emit('started', { startedAt })
+  try {
+    return await runSync(options, startedAt)
+  } finally {
+    // Always fires, success or failure, so listeners never get stuck thinking
+    // a sync is still running.
+    syncEvents.emit('settled', { startedAt })
+  }
+}
+
+function sameSheet(a, b) {
+  return JSON.stringify(a.headers) === JSON.stringify(b.headers) && JSON.stringify(a.rows) === JSON.stringify(b.rows)
+}
+
+async function runSync({ reason = 'manual', changedAt = null } = {}, startedAt) {
   broadcastStatus({ status: 'syncing', reason })
 
   const lastSyncedIds = await readLastSyncedIds()
-  const { headers, rows: rawSheetRows } = await fetchSheet()
+  const sheetSnapshot = await fetchSheet()
+  const { headers, rows: rawSheetRows, timeZone } = sheetSnapshot
 
   if (!headers || !headers.length) {
     const lastSyncTime = await getMetadata(LAST_SYNC_KEY)
@@ -64,7 +79,7 @@ async function executeSync({ reason = 'manual', changedAt = null } = {}) {
 
   await ensureColumnsForHeaders(headers)
 
-  const sheetRows = toRowObjects(headers, rawSheetRows)
+  const sheetRows = toRowObjects(headers, rawSheetRows, timeZone)
   const dbRows = await getAllRows()
   const plan = computeSyncPlan({ sheetRows, dbRows, lastSyncedIds })
 
@@ -75,8 +90,18 @@ async function executeSync({ reason = 'manual', changedAt = null } = {}) {
     await upsertRows(plan.upserts)
   }
 
-  const sheetHeaders = ['id', 'updated_at', 'deleted', ...getDynamicColumns(headers).map(c => c.header)]
-  await writeRowsToSheet(sheetHeaders, plan.sheetRows)
+  // The sheet write is a full clear and rewrite, so anything typed since we
+  // read the sheet would be erased. Re-read just before writing and bail if it
+  // moved. Throwing leaves synced_row_ids untouched, and a retry is safe
+  // because a sync is a full reconcile: the DB writes above are simply redone
+  // or found to be no-ops.
+  if (!sameSheet(sheetSnapshot, await fetchSheet())) {
+    const err = new Error('sheet changed during sync, retrying')
+    err.code = 'SHEET_CHANGED'
+    throw err
+  }
+
+  await writeRowsToSheet(orderedSheetHeaders(headers), plan.sheetRows, timeZone)
 
   await writeSyncLogs(plan.events.map(event => ({ ...event, status: 'success', message: null })))
   await writeConflictLogs(plan.conflicts)

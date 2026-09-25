@@ -19,28 +19,59 @@ function resolveWsUrl() {
 
 const WS_URL = resolveWsUrl()
 
+// "4:39:12 PM, 9 Sep 2026" in the viewer's local time, matching the sheet.
+function formatReadable(value) {
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value ?? '')
+  const time = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' })
+  const day = date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+  return `${time}, ${day}`
+}
+
+// id first, data columns next, bookkeeping last, matching the sheet and MySQL.
+const TRAILING_COLUMNS = ['updated_at', 'deleted']
+function orderColumns(keys, keyOf = k => k) {
+  const id = keys.filter(k => keyOf(k) === 'id')
+  const data = keys.filter(k => keyOf(k) !== 'id' && !TRAILING_COLUMNS.includes(keyOf(k)))
+  const trailing = TRAILING_COLUMNS.flatMap(t => keys.filter(k => keyOf(k) === t))
+  return [...id, ...data, ...trailing]
+}
+
+// Connects once for the component's lifetime. The handler is read through a
+// ref: depending on it directly would tear down and reopen the socket on every
+// render, and each close scheduled a reconnect, so sockets piled up.
 function useWebSocket(onMessage) {
+  const handlerRef = useRef(onMessage)
+  handlerRef.current = onMessage
+
   useEffect(() => {
     let socket
+    let reconnectTimer
+    let disposed = false
+
     function connect() {
       socket = new WebSocket(WS_URL)
       socket.onmessage = event => {
         try {
-          const data = JSON.parse(event.data)
-          onMessage(data)
+          handlerRef.current(JSON.parse(event.data))
         } catch (e) {}
       }
       socket.onclose = () => {
-        setTimeout(connect, 2000)
+        if (!disposed) {
+          reconnectTimer = setTimeout(connect, 2000)
+        }
       }
     }
+
     connect()
     return () => {
+      disposed = true
+      clearTimeout(reconnectTimer)
       if (socket) {
         socket.close()
       }
     }
-  }, [onMessage])
+  }, [])
 }
 
 function App() {
@@ -170,7 +201,7 @@ function App() {
             </div>
             <div className="text-xs text-white/60 border border-white/20 rounded-full px-3 py-1">
               Last sync:{' '}
-              {lastSyncTime ? new Date(lastSyncTime).toLocaleString() : 'Not yet'}
+              {lastSyncTime ? formatReadable(lastSyncTime) : 'Not yet'}
             </div>
             <button
               type="button"
@@ -246,8 +277,9 @@ function App() {
   )
 }
 
-function DataTable({ headers, rows }) {
-  if (!headers || !headers.length) {
+function DataTable({ headers: rawHeaders, rows }) {
+  const headers = orderColumns(rawHeaders || [], sanitizeColumnKey)
+  if (!headers.length) {
     return (
       <div className="p-4 text-sm text-white/50 bg-black">
         No data available
@@ -272,14 +304,14 @@ function DataTable({ headers, rows }) {
         {rows.map(row => (
           <tr key={row.id}>
             {headers.map(header => {
-              const key = header.toLowerCase().replace(/[^a-z0-9]+/g, '_')
+              const key = sanitizeColumnKey(header)
               return (
                 <td
                   key={header}
                   className="px-3 py-1.5 border-b border-white/10 text-white/80"
                 >
                   {key === 'updated_at' && row.updated_at
-                    ? new Date(row.updated_at).toLocaleString()
+                    ? formatReadable(row.updated_at)
                     : String(row[key] ?? '')}
                 </td>
               )
@@ -308,21 +340,20 @@ function DbTable({ rows, sheetHeaders = [] }) {
       </div>
     )
   }
-  const keys = Object.keys(rows[0]).filter(k => !DB_HIDE_COLUMNS.includes(k))
-  const keyToLabel = useMemo(() => {
-    const map = {}
-    const keySet = new Set(keys)
-    keys.forEach(k => {
-      map[k] = k
+  // Plain computation, not useMemo: a hook after the early return above runs
+  // only on some renders, which React rejects when rows go from 0 to some.
+  const keys = orderColumns(Object.keys(rows[0]).filter(k => !DB_HIDE_COLUMNS.includes(k)))
+  const keySet = new Set(keys)
+  const keyToLabel = {}
+  keys.forEach(k => {
+    keyToLabel[k] = k
+  })
+  if (Array.isArray(sheetHeaders) && sheetHeaders.length) {
+    sheetHeaders.forEach(h => {
+      const key = sanitizeColumnKey(h)
+      if (keySet.has(key)) keyToLabel[key] = String(h).trim() || key
     })
-    if (Array.isArray(sheetHeaders) && sheetHeaders.length) {
-      sheetHeaders.forEach(h => {
-        const key = sanitizeColumnKey(h)
-        if (keySet.has(key)) map[key] = String(h).trim() || key
-      })
-    }
-    return map
-  }, [rows, sheetHeaders])
+  }
   return (
     <table className="min-w-full text-xs bg-black">
       <thead className="bg-white/5 sticky top-0 z-10">
@@ -346,7 +377,7 @@ function DbTable({ rows, sheetHeaders = [] }) {
                 className="px-3 py-1.5 border-b border-white/10 text-white/80"
               >
                 {key === 'updated_at' && row[key]
-                  ? new Date(row[key]).toLocaleString()
+                  ? formatReadable(row[key])
                   : String(row[key] ?? '')}
               </td>
             ))}

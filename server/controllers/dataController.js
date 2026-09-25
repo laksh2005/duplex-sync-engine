@@ -5,8 +5,8 @@ const { logError } = require('../utils/logger')
 
 async function getSheetData(req, res) {
   try {
-    const { headers, rows } = await fetchSheetCached()
-    res.json({ headers, rows: toRowObjects(headers, rows) })
+    const { headers, rows, timeZone } = await fetchSheetCached()
+    res.json({ headers, rows: toRowObjects(headers, rows, timeZone) })
   } catch (err) {
     logError(err)
     res.status(500).json({ error: 'failed_to_load_sheet_data' })
@@ -39,15 +39,18 @@ async function getDbData(req, res) {
 
     const allowedKeys = getAllowedColumnKeys(headers)
 
+    // Same column order as the sheet: id, data columns, updated_at, deleted.
+    const ordered = headers && headers.length
+      ? ['id', ...getDynamicColumns(headers).map(c => c.key), 'updated_at', 'deleted']
+      : null
+
     const visibleRows = rows.map(row => {
+      const keys = ordered
+        ? ordered.filter(key => key in row)
+        : Object.keys(row).filter(key => key !== 'checksum' && (!allowedKeys || allowedKeys.has(key)))
       const projected = {}
-      Object.keys(row).forEach(key => {
-        if (key === 'checksum') {
-          return
-        }
-        if (!allowedKeys || allowedKeys.has(key)) {
-          projected[key] = row[key]
-        }
+      keys.forEach(key => {
+        projected[key] = row[key]
       })
       return projected
     })

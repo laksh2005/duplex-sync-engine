@@ -25,8 +25,14 @@ async function drain() {
       )
     }
   } catch (err) {
-    logError(err)
-    broadcastStatus({ status: 'error' })
+    if (err.code === 'SHEET_CHANGED') {
+      // Someone edited mid-sync; run again against the fresh sheet.
+      logInfo('sheet changed during sync, requeueing')
+      pending = pending || job
+    } else {
+      logError(err)
+      broadcastStatus({ status: 'error' })
+    }
   } finally {
     running = false
     if (pending) {

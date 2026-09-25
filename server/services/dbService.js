@@ -110,12 +110,72 @@ async function addMissingColumns(conn, keys) {
   await conn.query(`ALTER TABLE ${SYNC_TABLE} ${alters}`)
 }
 
-async function ensureColumnsForHeaders(headers) {
-  const dynamicColumns = getDynamicColumns(headers)
-  if (!dynamicColumns.length) {
+const COLUMN_DEFINITIONS = {
+  id: 'varchar(255) NOT NULL',
+  updated_at: 'datetime NOT NULL',
+  deleted: 'tinyint(1) NOT NULL DEFAULT 0',
+  checksum: 'varchar(64) NOT NULL'
+}
+
+async function getColumnsInOrder(conn = pool) {
+  const [rows] = await conn.query(
+    `SELECT COLUMN_NAME FROM information_schema.columns
+     WHERE table_schema = DATABASE() AND table_name = ? ORDER BY ORDINAL_POSITION`,
+    [SYNC_TABLE]
+  )
+  return rows.map(r => r.COLUMN_NAME)
+}
+
+/**
+ * Physically orders the table as id, the sheet's data columns, any columns
+ * the sheet no longer has, then updated_at, deleted and checksum, so a plain
+ * SELECT * reads the same way the sheet and dashboard do. Only runs an ALTER
+ * when the order is actually wrong, since reordering rebuilds the table.
+ */
+async function reorderColumns(dynamicKeys) {
+  const current = await getColumnsInOrder()
+  const reserved = ['id', 'updated_at', 'deleted', 'checksum']
+  const orphans = current.filter(c => !reserved.includes(c) && !dynamicKeys.includes(c))
+  const desired = ['id', ...dynamicKeys.filter(k => current.includes(k)), ...orphans, 'updated_at', 'deleted', 'checksum']
+
+  if (desired.join(',') === current.join(',')) {
+    return false
+  }
+
+  const moves = desired
+    .slice(1)
+    .map((col, i) => `MODIFY COLUMN ${quoteId(col)} ${COLUMN_DEFINITIONS[col] || 'varchar(255) NULL'} AFTER ${quoteId(desired[i])}`)
+  await pool.query(`ALTER TABLE ${SYNC_TABLE} ${moves.join(', ')}`)
+  return true
+}
+
+// MySQL keeps updated_at as a real DATETIME, since conflict resolution and
+// change detection compare it as a date. This view is the human-facing read
+// of the same table: sheet column order, readable time.
+const READABLE_VIEW = 'synced_rows_view'
+let viewSignature = null
+
+async function refreshReadableView(dynamicKeys) {
+  const signature = dynamicKeys.join(',')
+  if (signature === viewSignature) {
     return
   }
-  await addMissingColumns(pool, dynamicColumns.map(c => c.key))
+  const dataColumns = dynamicKeys.map(quoteId).join(', ')
+  await pool.query(
+    `CREATE OR REPLACE VIEW ${READABLE_VIEW} AS SELECT id${dataColumns ? `, ${dataColumns}` : ''},
+       DATE_FORMAT(updated_at, '%l:%i:%s %p, %e %b %Y') AS updated_at, deleted
+     FROM ${SYNC_TABLE}`
+  )
+  viewSignature = signature
+}
+
+async function ensureColumnsForHeaders(headers) {
+  const dynamicKeys = getDynamicColumns(headers).map(c => c.key)
+  if (dynamicKeys.length) {
+    await addMissingColumns(pool, dynamicKeys)
+  }
+  await reorderColumns(dynamicKeys)
+  await refreshReadableView(dynamicKeys)
 }
 
 async function getAllRows() {
@@ -316,5 +376,6 @@ module.exports = {
   SYNC_LOGS_TABLE,
   CONFLICT_LOGS_TABLE,
   METADATA_TABLE,
-  METRICS_TABLE
+  METRICS_TABLE,
+  READABLE_VIEW
 }
