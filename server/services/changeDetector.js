@@ -34,7 +34,12 @@ function differs(a, b) {
   if (!a || !b) {
     return false
   }
-  return a.rowCount !== b.rowCount || a.contentHash !== b.contentHash
+  // contentHash alone misses an edit that leaves the checksum column stale,
+  // which happens for any write that does not go through this app's own
+  // upsert path (a manual UPDATE, a script, another service). maxUpdatedAt
+  // catches that case: any edit that bumps updated_at is visible even when
+  // the row's checksum was never recomputed.
+  return a.rowCount !== b.rowCount || a.contentHash !== b.contentHash || a.maxUpdatedAt !== b.maxUpdatedAt
 }
 
 async function refreshBaseline() {
@@ -115,5 +120,6 @@ module.exports = {
   stopChangeDetector,
   readFingerprint,
   refreshBaseline,
+  differs,
   POLL_INTERVAL_MS
 }
