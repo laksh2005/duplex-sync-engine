@@ -35,7 +35,14 @@ function installTrigger() {
 }
 
 function onSheetEdit(e) {
-  bumpUpdatedAt(e);
+  // Stamping updated_at is best-effort. If it throws (a bad SYNC_TIMEZONE, a
+  // protected range), the webhook below must still fire, or the sheet stops
+  // syncing entirely.
+  try {
+    bumpUpdatedAt(e);
+  } catch (err) {
+    Logger.log('Could not stamp updated_at: ' + err);
+  }
 
   var props = PropertiesService.getScriptProperties();
   var url = props.getProperty('SYNC_WEBHOOK_URL');
