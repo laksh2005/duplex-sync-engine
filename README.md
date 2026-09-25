@@ -76,6 +76,52 @@ cd ../client && npm install && npm run dev
 
 Redis is optional. Without `REDIS_URL` the server falls back to an in-process runner that coalesces triggers the same way, which is enough for local development.
 
+### Full local walkthrough, no Docker (Windows)
+
+The order that actually works end to end, running MySQL and Redis directly instead of in containers.
+
+1. **MySQL.** Install MySQL 8 (MySQL Installer, Server component). Set a root password during setup. Then create the database:
+   ```sql
+   CREATE DATABASE parity;
+   ```
+   Everything else (tables, columns) is created automatically on first run.
+
+2. **Redis, via WSL.** Windows has no native Redis build, so install it inside WSL:
+   ```powershell
+   wsl --install
+   ```
+   Then inside the Ubuntu shell it opens:
+   ```bash
+   sudo apt update && sudo apt install -y redis-server
+   sudo service redis-server start
+   redis-cli ping   # expect PONG
+   ```
+   WSL2 shares `localhost` with Windows, so `REDIS_URL=redis://localhost:6379` in `.env` just works. Redis does not survive a reboot automatically, run `sudo service redis-server start` again each time.
+
+3. **`server/.env`.** Copy `server/.env.example` to `server/.env` and fill in: your MySQL password, `DB_NAME=parity`, the three `GOOGLE_*` values from your service account's JSON key, `REDIS_URL=redis://localhost:6379`, and a generated `WEBHOOK_SECRET`:
+   ```bash
+   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+   ```
+
+4. **Start the app.**
+   ```bash
+   cd server && npm install && npm start
+   cd client && npm install && npm run dev
+   ```
+   Open the dashboard, click **Sync Now**, confirm the Sheet and MySQL panels match.
+
+5. **A public tunnel**, so Google can reach your local server for push sync. Either works, no signup needed for the second:
+   ```bash
+   ngrok http 4000
+   # or, with no account at all:
+   ssh -R 80:localhost:4000 nokey@localhost.run
+   ```
+   Copy the `https://...` forwarding URL it prints. It changes every time the tunnel restarts, so this has to be redone whenever that terminal is closed and reopened.
+
+6. **Apps Script**, see "Turning on push sync" below, using the tunnel URL from step 5 as `SYNC_WEBHOOK_URL`.
+
+7. **Verify both directions.** Edit a cell in the Sheet, watch the server terminal log `sheet webhook accepted` then `sync ok` within about a second. Then run an `UPDATE ... SET updated_at = NOW()` against `synced_rows` in MySQL directly, and watch it appear in the Sheet within `DB_POLL_INTERVAL_MS`.
+
 ## Google Sheets setup
 
 1. Create a Google Cloud service account, enable the Sheets API, and download a JSON key.
